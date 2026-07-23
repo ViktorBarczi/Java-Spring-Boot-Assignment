@@ -14,6 +14,9 @@ import com.projekt.app.exceptions.NotFoundException;
 import com.projekt.app.repositories.IBookCopyRepository;
 import com.projekt.app.repositories.IBookRepository;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.cache.annotation.CacheEvict;
+import org.springframework.cache.annotation.Cacheable;
+import org.springframework.cache.annotation.Caching;
 import org.springframework.stereotype.Service;
 
 /**
@@ -33,6 +36,7 @@ public class BookService implements IBookService {
   /**
    * Retrieve all books from the database and map them to BookResponse DTOs.
    */
+  @Cacheable(value = "books", key = "'all'")
   public List<BookResponse> getAllBooks() {
     List<Book> list = bookRepository.findAll();
     if (list.isEmpty()) {
@@ -52,6 +56,7 @@ public class BookService implements IBookService {
   /**
    * Find a book by its ID or throw NotFoundException if not found.
    */
+  @Cacheable(value = "books", key = "#id")
   public Book getBookById(Long id) {
     Book book = bookRepository.findById(id).orElse(null);
     if (book == null) {
@@ -63,6 +68,7 @@ public class BookService implements IBookService {
   /**
    * Save a new book to the database after validating it doesn't already exist by title.
    */
+  @CacheEvict(value = "books", key = "'all'")
   public Book saveBook(BookRequest BookRequest) throws BadRequestException {
     if (!bookRepository.findByTitle(BookRequest.getTitle()).isEmpty()) {
       throw new BadRequestException(
@@ -79,6 +85,10 @@ public class BookService implements IBookService {
   /**
    * Delete a book and all its associated copies from the database.
    */
+  @Caching(evict = {
+      @CacheEvict(value = "books", key = "#id"),
+      @CacheEvict(value = "books", key = "'all'")
+  })
   public void deleteBook(Long id) {
     Optional<Book> book = bookRepository.findById(id);
     if (book != null) {
@@ -94,6 +104,10 @@ public class BookService implements IBookService {
   /**
    * Update an existing book's title and/or published year.
    */
+  @Caching(evict = {
+      @CacheEvict(value = "books", key = "#id"),
+      @CacheEvict(value = "books", key = "'all'")
+  })
   public Book updateBook(Long id, BookUpdate bookUpdate) {
     Book existingBook = bookRepository.findById(id).orElse(null);
     if (existingBook != null) {
