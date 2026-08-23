@@ -1,9 +1,11 @@
 package com.projekt.app.services;
 
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Optional;
 import com.projekt.app.dtos.BookCopyAvaliability;
+import com.projekt.app.dtos.BookReport;
 import com.projekt.app.dtos.BookRequest;
 import com.projekt.app.dtos.BookResponse;
 import com.projekt.app.dtos.BookUpdate;
@@ -13,6 +15,7 @@ import com.projekt.app.exceptions.BadRequestException;
 import com.projekt.app.exceptions.NotFoundException;
 import com.projekt.app.repositories.IBookCopyRepository;
 import com.projekt.app.repositories.IBookRepository;
+import com.projekt.app.utils.Utilities;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.cache.annotation.CacheEvict;
 import org.springframework.cache.annotation.Cacheable;
@@ -39,6 +42,22 @@ public class BookService implements IBookService {
   @Cacheable(value = "books", key = "'all'")
   public List<BookResponse> getAllBooks() {
     List<Book> list = bookRepository.findAll();
+
+    // testing analyseBooks method call
+    BookReport report = Utilities.analyseBooks(list, b -> b.getPublishedYear() > 2000, // primaryFilter
+        b -> Utilities.isValidIsbn13(b.getIsbn()), // secondaryFilter
+        b -> {
+          b.setAuthor(b.getAuthor().trim());
+          return b;
+        }, // normaliser
+        b -> b.getTitle() + " – " + b.getAuthor(), // mapper
+        String::toUpperCase, // decorator
+        Comparator.naturalOrder(), // order
+        (s, i) -> i + ". " + s, // indexer
+        (a, b) -> a + "\n" + b, // accumulator
+        System.out::println, // entryConsumer
+        () -> "No books matched" // emptyFallback
+    );
     if (list.isEmpty()) {
       return new ArrayList<>();
     }
@@ -85,10 +104,8 @@ public class BookService implements IBookService {
   /**
    * Delete a book and all its associated copies from the database.
    */
-  @Caching(evict = {
-      @CacheEvict(value = "books", key = "#id"),
-      @CacheEvict(value = "books", key = "'all'")
-  })
+  @Caching(evict = {@CacheEvict(value = "books", key = "#id"),
+      @CacheEvict(value = "books", key = "'all'")})
   public void deleteBook(Long id) {
     Optional<Book> book = bookRepository.findById(id);
     if (book != null) {
@@ -104,10 +121,8 @@ public class BookService implements IBookService {
   /**
    * Update an existing book's title and/or published year.
    */
-  @Caching(evict = {
-      @CacheEvict(value = "books", key = "#id"),
-      @CacheEvict(value = "books", key = "'all'")
-  })
+  @Caching(evict = {@CacheEvict(value = "books", key = "#id"),
+      @CacheEvict(value = "books", key = "'all'")})
   public Book updateBook(Long id, BookUpdate bookUpdate) {
     Book existingBook = bookRepository.findById(id).orElse(null);
     if (existingBook != null) {
