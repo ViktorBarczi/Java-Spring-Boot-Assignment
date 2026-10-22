@@ -1,5 +1,6 @@
 package com.projekt.app.config;
 
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.data.redis.cache.RedisCacheConfiguration;
@@ -21,6 +22,7 @@ import java.time.Duration;
  *  - Expire entries after 10 minutes (TTL)
  */
 @Configuration
+@ConditionalOnProperty(name = "spring.cache.type", havingValue = "redis")
 public class RedisConfig {
 
     /**

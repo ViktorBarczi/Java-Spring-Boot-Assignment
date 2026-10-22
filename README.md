@@ -2,6 +2,19 @@
 
 A Spring Boot application that provides a RESTful API to manage books and their copies in a simple library system.
 
+## Docker assignment
+
+See [DOCKER-ZADANIE.md](DOCKER-ZADANIE.md) for the Slovak walkthrough: container build,
+API login, PostgreSQL volume persistence, multiple instances, Docker Hub publication, and presentation questions.
+
+```powershell
+docker compose up -d --build --scale app=2 --wait --wait-timeout 180
+docker compose ps
+docker compose port --index 1 app 8081
+```
+
+Containers use PostgreSQL; normal IDE runs use the in-memory H2 database. Redis caching is disabled by default.
+
 ## Features
 
 - Add, retrieve, update, and delete books
@@ -40,20 +53,25 @@ cd library-management-system
 ./mvnw spring-boot:run
 ```
 
-The app will start at: `http://localhost:8080`
+The app will start at: `http://localhost:8081`
+
+Read books at `GET /api/books`. To obtain a JWT, send `POST /auth/login` with
+`{"username":"Viktor","password":"pass"}` as JSON. Use the returned token as a Bearer token for write requests.
+The login currently checks only the hardcoded password, not a database account.
 
 ### Swagger UI
 
-Once the app is running, visit:
+Swagger routes are protected by the current security configuration. They are not a public login UI.
+The configured paths are:
 
 ```
-http://localhost:8080/swagger-ui.html
+http://localhost:8081/swagger-ui.html
 ```
 
 or
 
 ```
-http://localhost:8080/swagger-ui/index.html
+http://localhost:8081/swagger-ui/index.html
 ```
 
 To explore and test the API.
@@ -88,7 +106,7 @@ To explore and test the API.
 
 ```json
 {
-  "title": "Clean Code (2nd Edition)"
+  "title": "Clean Code (2nd Edition)",
   "publishedYear": 1999
 }
 ```
@@ -111,11 +129,8 @@ To run tests:
 
 ## H2 Database Console
 
-Access the in-memory H2 database at:
-
-```
-http://localhost:8080/h2-console
-```
+The H2 console is not enabled by default. IDE runs use an in-memory database whose data is lost on shutdown.
+Docker runs use PostgreSQL and a persistent volume instead.
 
 **JDBC URL:** `jdbc:h2:mem:testdb`  
 **User:** `sa`  

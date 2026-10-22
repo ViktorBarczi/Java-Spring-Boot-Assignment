@@ -103,7 +103,7 @@ public class Utilities {
 
   public static boolean isValidIsbn13(String isbn) {
     // Remove hyphens if any
-    isbn = isbn.replace("-", "");
+    isbn = replaceChars("-", "",isbn);
 
     // Must be 13 digits and only digits
     if (isbn.length() != 13 || !isbn.matches("\\d{13}")) {
