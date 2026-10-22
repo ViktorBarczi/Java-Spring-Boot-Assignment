@@ -10,8 +10,14 @@ API login, PostgreSQL volume persistence, multiple instances, Docker Hub publica
 ```powershell
 docker compose up -d --build --scale app=2 --wait --wait-timeout 180
 docker compose ps
-docker compose port --index 1 app 8081
+docker compose port nginx 80
 ```
+
+Use **http://localhost:8080** for the Docker API, including `POST /auth/login` and
+`GET /api/books`. Nginx distributes requests across the two application instances.
+The app containers expose port 8081 only inside Docker. Set `NGINX_PORT` in `.env`
+to change the host port. The `X-Upstream-Addr` response header identifies the backend
+that handled each request; `docker compose logs -f nginx` also shows routing.
 
 Containers use PostgreSQL; normal IDE runs use the in-memory H2 database. Redis caching is disabled by default.
 

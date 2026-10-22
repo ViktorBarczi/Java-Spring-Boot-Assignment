@@ -86,6 +86,13 @@ public class BookService implements IBookService {
 
   /**
    * Save a new book to the database after validating it doesn't already exist by title.
+   * Example body:
+      {
+        "title": "Clean Code",
+        "author": "Robert C. Martin",
+        "isbn": "9780132350884",
+        "publishedYear": 2008
+      }
    */
   @CacheEvict(value = "books", key = "'all'")
   public Book saveBook(BookRequest BookRequest) throws BadRequestException {

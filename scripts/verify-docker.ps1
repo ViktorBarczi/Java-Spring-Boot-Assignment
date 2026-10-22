@@ -16,8 +16,8 @@ function Invoke-Compose {
     Invoke-Docker compose -p library @args
 }
 
-function Get-AppUrl([int]$Index) {
-    $address = Invoke-Compose port --index $Index app 8081
+function Get-ProxyUrl {
+    $address = Invoke-Compose port nginx 80
     return "http://$($address.Trim())"
 }
 
@@ -26,6 +26,43 @@ function Assert-BookExists([string]$Url, [string]$Isbn) {
     if (-not ($books | Where-Object { $_.isbn -eq $Isbn })) {
         throw "Demo book was not returned by $Url"
     }
+}
+
+function Assert-LoadBalancing([string]$Url, [string]$Isbn, [int]$ExpectedBackends, [switch]$WaitForDns) {
+    # Allow Docker DNS and Nginx to pick up the current set of replicas.
+    $deadline = (Get-Date).AddSeconds(30)
+    do {
+        $backends = @()
+        $settled = $true
+        foreach ($request in 1..12) {
+            try {
+                $response = Invoke-WebRequest -UseBasicParsing -Uri "$Url/api/books" -TimeoutSec 15
+            } catch {
+                $status = [int]$_.Exception.Response.StatusCode
+                if (-not $WaitForDns -or $status -notin @(502, 503, 504)) { throw }
+                Write-Host "Waiting for Docker DNS to settle after scaling (HTTP $status)."
+                $settled = $false
+                break
+            }
+            $books = $response.Content | ConvertFrom-Json
+            if (-not ($books | Where-Object { $_.isbn -eq $Isbn })) {
+                throw 'The book was not returned through Nginx.'
+            }
+            $backend = [string]$response.Headers['X-Upstream-Addr']
+            if ([string]::IsNullOrWhiteSpace($backend)) {
+                throw 'Nginx did not identify the upstream application.'
+            }
+            # A retry can list more than one address; count only the successful backend.
+            $backends += ($backend -split ',')[-1].Trim()
+        }
+        $uniqueBackends = @($backends | Sort-Object -Unique)
+        if ($settled -and $uniqueBackends.Count -eq $ExpectedBackends) {
+            Write-Host "Nginx routed requests to: $($uniqueBackends -join ', ')"
+            return
+        }
+        Start-Sleep -Seconds 2
+    } while ((Get-Date) -lt $deadline)
+    throw "Expected $ExpectedBackends backends, observed: $($uniqueBackends -join ', ')"
 }
 
 Invoke-Compose config --quiet
@@ -38,12 +75,12 @@ if (-not $SkipBuildAndTests) {
     $javaTestsStatus = 'passed'
 }
 
-Write-Host 'Starting two application instances and PostgreSQL...'
+Write-Host 'Starting Nginx, two application instances and PostgreSQL...'
 Invoke-Compose up -d --no-build --scale app=2 --wait --wait-timeout 180
-$firstUrl = Get-AppUrl 1
-$secondUrl = Get-AppUrl 2
+$baseUrl = Get-ProxyUrl
+Invoke-Compose exec -T nginx nginx -t
 
-$login = Invoke-RestMethod -Method Post -Uri "$firstUrl/auth/login" `
+$login = Invoke-RestMethod -Method Post -Uri "$baseUrl/auth/login" `
     -ContentType 'application/json' -Body '{"username":"Viktor","password":"pass"}' -TimeoutSec 15
 if (-not $login.token) { throw 'Login returned no token.' }
 $headers = @{ Authorization = "Bearer $($login.token)" }
@@ -64,21 +101,34 @@ $book = @{
     publishedYear = 2026
 } | ConvertTo-Json
 
-# A token from instance 1 must also authorize writes to instance 2.
-$created = Invoke-WebRequest -UseBasicParsing -Method Post -Uri "$secondUrl/api/books" `
+# Nginx must forward the JSON body and Bearer token to the app.
+$created = Invoke-WebRequest -UseBasicParsing -Method Post -Uri "$baseUrl/api/books" `
     -Headers $headers -ContentType 'application/json' -Body $book -TimeoutSec 15
 if ([int]$created.StatusCode -ne 201) { throw 'Book creation did not return HTTP 201.' }
-Assert-BookExists $firstUrl $isbn
-Assert-BookExists $secondUrl $isbn
-Write-Host 'Login, authenticated write and shared reads passed.'
+Assert-LoadBalancing $baseUrl $isbn 2
+Write-Host 'Login, authenticated write and reads through both backends passed.'
+
+Write-Host 'Checking dynamic discovery when scaling from two to three instances...'
+$proxyId = Invoke-Compose ps -q nginx
+try {
+    Invoke-Compose up -d --no-build --scale app=3 --wait --wait-timeout 180
+    Assert-LoadBalancing $baseUrl $isbn 3 -WaitForDns
+    if ((Invoke-Compose ps -q nginx) -ne $proxyId) {
+        throw 'Nginx was recreated instead of discovering the new instance.'
+    }
+} finally {
+    Invoke-Compose up -d --no-build --scale app=2 --wait --wait-timeout 180
+}
+Assert-LoadBalancing $baseUrl $isbn 2 -WaitForDns
+if ((Invoke-Compose ps -q nginx) -ne $proxyId) {
+    throw 'Nginx was recreated during scale-down.'
+}
 
 Write-Host 'Removing and recreating containers while retaining the volume...'
 Invoke-Compose down
 Invoke-Compose up -d --no-build --scale app=2 --wait --wait-timeout 180
-$firstUrl = Get-AppUrl 1
-$secondUrl = Get-AppUrl 2
-Assert-BookExists $firstUrl $isbn
-Assert-BookExists $secondUrl $isbn
+$baseUrl = Get-ProxyUrl
+Assert-LoadBalancing $baseUrl $isbn 2
 Write-Host 'Volume persistence passed.'
 
 # These two app containers are launched manually against the same PostgreSQL service.
@@ -122,10 +172,11 @@ New-Item -ItemType Directory -Path target -Force | Out-Null
     composeInstances = 2
     manualInstances = 2
     persistenceAfterRecreation = 'passed'
-    firstUrl = $firstUrl
-    secondUrl = $secondUrl
+    loadBalancing = 'passed'
+    dynamicScaling = 'passed (2 -> 3 -> 2 without restarting Nginx)'
+    baseUrl = $baseUrl
     demoBookTitle = $title
     demoBookIsbn = $isbn
 } | ConvertTo-Json | Set-Content -Encoding UTF8 target/docker-verification.json
 Invoke-Compose ps
-Write-Host "All local checks passed. APIs: $firstUrl and $secondUrl"
+Write-Host "All local checks passed. Load-balanced API: $baseUrl"

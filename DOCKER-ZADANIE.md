@@ -6,8 +6,9 @@ Na vytvorenie image nepotrebuješ lokálne inštalovať Maven ani Javu: zostaven
 
 ```mermaid
 flowchart LR
-    client[Postman alebo prehliadač] --> app1[Aplikácia 1]
-    client --> app2[Aplikácia 2]
+    client[Postman alebo prehliadač] --> nginx[Nginx localhost:8080]
+    nginx --> app1[Aplikácia 1 :8081]
+    nginx --> app2[Aplikácia 2 :8081]
     app1 --> db[(PostgreSQL)]
     app2 --> db
     db --> volume[(Pomenovaný Docker volume)]
@@ -16,7 +17,7 @@ flowchart LR
 | Bod zadania | Riešenie | Čo ukázať pri odovzdaní |
 | --- | --- | --- |
 | Vytvorenie kontajnera (1 b.) | `Dockerfile` | Zostavenie image a bežiaci kontajner |
-| Interakcia s aplikáciou (2 b.) | REST API na porte 8081 v kontajneri | Login, pridanie knihy a zoznam kníh v Postmane |
+| Interakcia s aplikáciou (2 b.) | REST API cez Nginx na localhost:8080 | Login, pridanie knihy a zoznam kníh v Postmane |
 | Perzistencia vo volume (2 b.) | PostgreSQL a pomenovaný volume | Kniha zostane aj po `docker compose down` a novom `up` |
 | Vzdialený repozitár (1 b.) | `viktorbarczi/pims_zadanie:1.0` | Úspešný push, tag v Docker Hube a pull |
 | Viac inštancií manuálne (1 b.) | Dva príkazy `docker run` | Dva kontajnery na portoch 18081 a 18082 |
@@ -42,29 +43,31 @@ docker compose ps
 ```
 
 Prvé zostavenie sťahuje základné images a Maven závislosti, preto môže trvať niekoľko minút.
-Compose spustí PostgreSQL, počká na jeho healthcheck a potom spustí aplikáciu.
+Compose spustí PostgreSQL, počká na jeho healthcheck a potom spustí dve inštancie aplikácie.
+Keď sú aplikácie zdravé, spustí Nginx na porte 8080. Počet aplikácií nastavuje `scale: 2` v Compose súbore.
 Toto poradie zabezpečuje `depends_on` s podmienkou `service_healthy`
 ([Docker dokumentácia](https://docs.docker.com/compose/how-tos/startup-order/)).
 
-Hostiteľské porty sa prideľujú automaticky, takže sa líšia od portu 8081 v kontajneri.
-Zisti adresu prvej inštancie:
+Spoločná adresa pre Postman aj prehliadač je **http://localhost:8080**.
+Na počítači je sprístupnený iba Nginx; aplikácie používajú port 8081 vo vnútri Docker siete.
+Aktuálnu adresu proxy zistíš aj príkazom:
 
 ```powershell
-$address = docker compose port --index 1 app 8081
+$address = docker compose port nginx 80
 $baseUrl = "http://$($address.Trim())"
 $baseUrl
 Invoke-RestMethod "$baseUrl/api/books"
 ```
 
-Ak napríklad dostaneš `127.0.0.1:32768`, v Postmane použi `http://localhost:32768`.
-Po opätovnom vytvorení kontajnerov adresu zisti znova, pretože sa môže zmeniť.
-Príkaz `docker compose port --index` umožňuje zistiť port konkrétnej repliky
+Predvolený výsledok je `127.0.0.1:8080`. Ak potrebuješ iný port, nastav napríklad
+`NGINX_PORT=8090` v súbore `.env` a znova spusti `docker compose up -d --wait`.
+Príkaz `docker compose port` ukazuje mapovanie portu kontajnera na port počítača
 ([Docker dokumentácia](https://docs.docker.com/reference/cli/docker/compose/port/)).
 
 Logy a zastavenie:
 
 ```powershell
-docker compose logs --tail 100 app db
+docker compose logs --tail 100 nginx app db
 docker compose down
 ```
 
@@ -72,7 +75,7 @@ docker compose down
 
 V Postmane nastav:
 
-- **POST** `http://localhost:SKUTOCNY_PORT/auth/login`
+- **POST** `http://localhost:8080/auth/login`
 - **Authorization → No Auth**
 - **Body → raw → JSON**:
 
@@ -122,7 +125,7 @@ Najprv pridaj knihu podľa predchádzajúcej časti. Potom odstráň kontajnery 
 docker compose down
 docker volume inspect library_postgres-data
 docker compose up -d --wait --wait-timeout 180
-$address = docker compose port --index 1 app 8081
+$address = docker compose port nginx 80
 $baseUrl = "http://$($address.Trim())"
 Invoke-RestMethod "$baseUrl/api/books"
 ```
@@ -139,22 +142,44 @@ Pre `postgres:17-alpine` je volume pripojený do `/var/lib/postgresql/data`, kde
 ```powershell
 docker compose up -d --scale app=2 --wait --wait-timeout 180
 docker compose ps
-docker compose port --index 1 app 8081
-docker compose port --index 2 app 8081
+docker compose port nginx 80
 ```
 
-Over, že obe inštancie čítajú tú istú knihu:
+Posielaj požiadavky na rovnakú adresu a sleduj hlavičku `X-Upstream-Addr`:
 
 ```powershell
-$address1 = docker compose port --index 1 app 8081
-$address2 = docker compose port --index 2 app 8081
-Invoke-RestMethod "http://$($address1.Trim())/api/books"
-Invoke-RestMethod "http://$($address2.Trim())/api/books"
+$address = docker compose port nginx 80
+1..10 | ForEach-Object {
+  $response = Invoke-WebRequest -UseBasicParsing "http://$($address.Trim())/api/books"
+  $response.Headers['X-Upstream-Addr']
+}
 ```
 
-Každá inštancia má vlastný hostiteľský port. Vo vnútri každého kontajnera aplikácia počúva na 8081.
-Hostiteľský port nie je v konfigurácii pevne určený, preto ho Docker pridelí automaticky
-([Docker dokumentácia](https://docs.docker.com/reference/compose-file/services/#ports)).
+V odpovediach sa majú objaviť dve rôzne interné IP adresy, napríklad `172.20.0.3:8081`
+a `172.20.0.4:8081`. Hlavičku nájdeš aj v Postmane v **response Headers**.
+Každá požiadavka ide cez Nginx, ktorý vyberie jednu aplikáciu predvolenou metódou round-robin
+([Nginx dokumentácia](https://nginx.org/en/docs/http/ngx_http_upstream_module.html#upstream)).
+Healthchecky tiež posielajú požiadavky, preto nemusíš vidieť presné striedanie pri každom kliknutí.
+
+Smerovanie vidíš aj v logoch:
+
+```powershell
+docker compose logs -f nginx
+```
+
+Pridanie tretej inštancie nevyžaduje meniť Nginx konfiguráciu:
+
+```powershell
+docker compose up -d --scale app=3 --wait --wait-timeout 180
+```
+
+Nginx cez Docker DNS priebežne obnovuje adresy služby `app` (interval 5 sekúnd).
+Používa `server app:8081 resolve` a spoločnú upstream zónu; automatické obnovovanie DNS
+je v open-source Nginx podporované od 1.27.3
+([Nginx dokumentácia](https://nginx.org/en/docs/http/ngx_http_upstream_module.html#server)).
+Späť na dve inštancie sa vrátiš príkazom `docker compose up -d --scale app=2 --wait`.
+Po zmene počtu kontajnerov nechaj niekoľko sekúnd na obnovenie DNS. Pri odstránení inštancie
+sa môže počas tejto krátkej doby objaviť odpoveď `502`; ide o jednoduchú Compose ukážku bez postupného vyradenia spojení.
 
 Obe aplikácie používajú `db:5432` a spoločný JWT podpisový kľúč. Redis zostáva vypnutý.
 Databázovú schému vytvorí PostgreSQL ešte pred štartom aplikácií, takže sa dve repliky nepokúšajú vytvárať rovnaké tabuľky súčasne.
@@ -162,6 +187,7 @@ Databázovú schému vytvorí PostgreSQL ešte pred štartom aplikácií, takže
 ## 5. Dve inštancie manuálne, bez Compose
 
 Táto ukážka používa vlastný volume a začína s vlastnou databázou.
+Ukazuje priame manuálne spustenie aplikácií; Nginx je súčasťou Compose ukážky vyššie.
 Porty 18081 a 18082 musia byť voľné. Ak ich používa iná aplikácia, zvoľ iné hostiteľské porty.
 
 ```powershell
@@ -232,7 +258,7 @@ docker compose pull app
 docker compose up -d --no-build --scale app=2 --wait --wait-timeout 180
 ```
 
-Na druhý počítač prenes `compose.yaml` a priečinok `docker` s inicializačným SQL.
+Na druhý počítač prenes `compose.yaml` a priečinok `docker` s inicializačným SQL aj `nginx.conf`.
 Zdrojové súbory Javy nie sú pri spustení s `--no-build` potrebné.
 Image neobsahuje údaje z volume. Druhý počítač má vlastný volume a vlastnú databázu.
 
@@ -244,32 +270,35 @@ Image neobsahuje údaje z volume. Druhý počítač má vlastný volume a vlastn
 | Čo robí Dockerfile? | Prvá fáza používa Maven a JDK 17 na zostavenie JAR. Druhá fáza obsahuje JRE 17, výsledný JAR a curl pre healthcheck. Aplikáciu spúšťa `java -jar /app/app.jar` ako používateľ `app`. |
 | Prečo sú dve fázy? | Výsledný image nepotrebuje Maven, kompilátor ani zdrojové súbory. Kopíruje sa iba zostavený JAR. |
 | Čo robí EXPOSE a čo parameter -p? | `EXPOSE 8081` opisuje port aplikácie v image. `-p 8082:8081` skutočne sprístupní port 8081 kontajnera cez port 8082 na počítači. |
-| Prečo majú dve inštancie rôzne hostiteľské porty? | Rovnakú IP a port na počítači nemôžu naraz obsadiť dva kontajnery. Vlastný interný port 8081 môže mať každá inštancia. |
+| Prečo majú dve inštancie v manuálnej ukážke rôzne hostiteľské porty? | Rovnakú IP a port na počítači nemôžu naraz obsadiť dva kontajnery. V Compose ukážke je zverejnený iba Nginx na porte 8080; aplikácie majú iba interný port 8081. |
 | Kde sú uložené zmeny? | V PostgreSQL databáze. Jej súbory sa zapisujú do pomenovaného Docker volume, ktorý prežije odstránenie kontajnera. |
 | Prečo nestačí pôvodná H2 databáza? | Pôvodné `jdbc:h2:mem:testdb` ukladá údaje iba do RAM a každá inštancia by mala vlastnú databázu. Docker profil pripája všetky inštancie k spoločnému PostgreSQL. |
 | Ako aplikácia nájde databázu? | Na spoločnej Docker sieti sa názov `db` preloží na databázový kontajner. `localhost` v aplikačnom kontajneri by označoval samotný aplikačný kontajner. |
-| Ako prebieha požiadavka? | HTTP požiadavka ide cez namapovaný port do Spring Security a kontroléra. Kontrolér volá službu, tá JPA repozitár a PostgreSQL. Zápisové požiadavky potrebujú Bearer token. |
+| Ako prebieha požiadavka? | HTTP požiadavka ide na localhost:8080 do Nginx, ktorý vyberie jednu aplikáciu. Tá použije Spring Security, kontrolér, službu, JPA repozitár a spoločný PostgreSQL. Zápisové požiadavky potrebujú Bearer token. |
+| Aký je rozdiel medzi Compose a Nginx? | Compose vytvára a nastavuje kontajnery. Nginx prijíma HTTP požiadavky na jednej adrese a rozdeľuje ich medzi bežiace aplikácie. |
 | Čo je Docker Compose? | Súbor deklaruje služby, image, porty, premenné, závislosti a volume. Jedným príkazom ich spustí a pomocou `--scale` vytvorí viac kópií aplikácie. |
 | Čo obsahuje Docker Hub? | Verzionovaný image aplikácie, nie bežiaci proces ani databázové dáta. `push` ho nahrá a `pull` stiahne. |
-| Na čo je healthcheck? | PostgreSQL kontroluje prijímanie pripojení. Aplikácia kontroluje odpoveď verejného `/api/books`, čím overí aj čítanie z databázy. |
+| Na čo je healthcheck? | PostgreSQL kontroluje prijímanie pripojení. Aplikácia kontroluje `/api/books`, čím overí aj čítanie z databázy. Nginx kontroluje rovnakú cestu cez proxy. |
 
 Rozdelenie zostavenia a behu vychádza z [multi-stage buildov v Docker dokumentácii](https://docs.docker.com/build/building/multi-stage/).
 
 ## Súbory a lokálny beh
 
 Na automatické overenie môžeš spustiť `./scripts/verify-docker.ps1`.
-Skript zostaví image, spustí Java testy, dve Compose inštancie a dve manuálne inštancie,
-pridá ukážkovú knihu a opätovným vytvorením Compose kontajnerov overí perzistenciu.
+Skript zostaví image, spustí Java testy, Nginx, dve Compose inštancie a dve manuálne inštancie.
+Overí login, zápis a čítanie cez proxy, rozdelenie požiadaviek medzi aplikácie aj škálovanie 2 → 3 → 2 bez reštartu Nginx.
+Pridá ukážkovú knihu a opätovným vytvorením Compose kontajnerov overí perzistenciu.
 Počas kontroly reštartuje projekt `library`; volume aj ukážková kniha zostanú zachované.
-Výsledok zapíše do `target/docker-verification.json` a dve Compose inštancie nechá bežať.
+Výsledok zapíše do `target/docker-verification.json` a Nginx s dvoma Compose inštanciami nechá bežať.
 Skript používa predvolené databázové a JWT nastavenia tejto ukážky.
 
 - `Dockerfile`: zostavenie a spustenie aplikácie.
 - `.dockerignore`: do build kontextu idú iba Maven konfigurácia a zdrojové súbory.
-- `compose.yaml`: databáza, škálovateľná aplikácia, sieť a volume.
+- `compose.yaml`: Nginx, databáza, škálovateľná aplikácia, sieť a volume.
+- `docker/nginx.conf`: load balancer, proxy hlavičky a automatické zisťovanie adries aplikácií.
 - `docker/init-db.sql`: vytvorenie tabuliek a sekvencií pri prvom štarte prázdnej databázy.
 - `application-docker.properties`: PostgreSQL profil; Hibernate overuje existujúcu schému.
-- `.env.example`: voliteľné nastavenie image, databázového hesla a spoločného JWT kľúča.
+- `.env.example`: voliteľné nastavenie image, portu Nginx, databázového hesla a spoločného JWT kľúča.
 
 Pri zmene entít treba upraviť aj databázovú schému. Inicializačné SQL sa na existujúcom volume opätovne nespúšťa.
 Bežné spustenie z IDE bez profilu `docker` naďalej používa H2 v pamäti. Testovacie prihlasovanie `Viktor` / `pass` zostáva rovnaké.
