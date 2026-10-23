@@ -22,7 +22,6 @@ services:
     build: .
     scale: 2
     environment:
-      SPRING_PROFILES_ACTIVE: docker
       DB_URL: jdbc:postgresql://db:5432/library
       DB_USERNAME: library
       DB_PASSWORD: ${DB_PASSWORD:-library-demo}
